@@ -30,13 +30,70 @@ fn parse(source: &str) -> Term {
     }
 }
 
-pub(super) fn evaluate_source(source: &str, show_term: bool) -> (Option<String>, String) {
+pub(super) fn evaluate_source_with_list(
+    source: &str,
+    show_term: bool,
+    numbers: &[i32],
+) -> (Option<String>, String) {
     let term = parse(source);
+    let input = church_list(numbers);
     let display = show_term.then(|| term.to_string());
     let mut context = EvalContext::new();
-    let value = context.eval(0, &term);
+    let function = context.eval(0, &term);
+    let list = context.eval(0, &input);
+    let value = context.apply(function, list);
     let result = display_result(&mut context, value);
     (display, result)
+}
+
+fn church_list(numbers: &[i32]) -> Term {
+    let mut list = Term::App(
+        constructor(0, 2).into(),
+        Term::Fun(Term::Var(0).into()).into(),
+    );
+    for number in numbers.iter().rev() {
+        let tail = Term::Fun(
+            Term::App(
+                Term::App(Term::Var(0).into(), list.into()).into(),
+                Term::Fun(Term::Var(0).into()).into(),
+            )
+            .into(),
+        );
+        let tuple = Term::Fun(
+            Term::App(
+                Term::App(Term::Var(0).into(), church_integer(*number).into()).into(),
+                tail.into(),
+            )
+            .into(),
+        );
+        list = Term::App(constructor(1, 2).into(), tuple.into());
+    }
+    list
+}
+
+fn constructor(index: usize, total: usize) -> Term {
+    let mut term = Term::App(Term::Var(total - index - 1).into(), Term::Var(total).into());
+    for _ in 0..total {
+        term = Term::Fun(term.into());
+    }
+    Term::Fun(term.into())
+}
+
+fn church_integer(number: i32) -> Term {
+    let mut term = Term::Fun(Term::Var(0).into());
+    for bit in (0..32).rev() {
+        let boolean = Term::Fun(
+            Term::Fun(Term::Var(if number & (1 << bit) != 0 { 1 } else { 0 }).into()).into(),
+        );
+        term = Term::Fun(
+            Term::App(
+                Term::App(Term::Var(0).into(), boolean.into()).into(),
+                term.into(),
+            )
+            .into(),
+        );
+    }
+    term
 }
 
 struct Parser<'a> {
