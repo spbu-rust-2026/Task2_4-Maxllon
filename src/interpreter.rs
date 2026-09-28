@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 #[derive(Debug, Clone, PartialEq)]
 enum Term {
     Var(usize),
@@ -20,124 +18,188 @@ impl std::fmt::Display for Term {
 }
 
 fn parse(source: &str) -> Term {
-    parse_term(source).unwrap_or(Term::Error)
+    let mut parser = Parser {
+        source: source.trim(),
+        position: 0,
+    };
+    let term = parser.parse_term();
+    if parser.position == parser.source.len() {
+        term.unwrap_or(Term::Error)
+    } else {
+        Term::Error
+    }
 }
 
-pub(super) fn evaluate_source(source: &str) -> (String, String) {
+pub(super) fn evaluate_source(source: &str, show_term: bool) -> (Option<String>, String) {
     let term = parse(source);
-    let display = term.to_string();
-    let result = display_result(run(&term));
+    let display = show_term.then(|| term.to_string());
+    let mut context = EvalContext::new();
+    let value = context.eval(0, &term);
+    let result = display_result(&mut context, value);
     (display, result)
 }
 
-fn parse_term(source: &str) -> Option<Term> {
-    let source = source.trim();
-    if source == "error" {
-        return Some(Term::Error);
-    }
-    if let Some(body) = source.strip_prefix("(λ.") {
-        if let Some(body) = body.strip_suffix(')') {
-            return Some(Term::Fun(parse_term(body)?.into()));
-        }
-    }
-    if let Some(body) = source.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-        if let Some(separator) = application_separator(body) {
-            return Some(Term::App(
-                parse_term(&body[..separator])?.into(),
-                parse_term(&body[separator..])?.into(),
-            ));
-        }
-    }
-    if let Some(index) = source.strip_prefix('i').and_then(|s| s.parse().ok()) {
-        return Some(Term::Var(index));
-    }
-    None
+struct Parser<'a> {
+    source: &'a str,
+    position: usize,
 }
 
-fn application_separator(source: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut separator = None;
-    for (index, character) in source.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ' ' if depth == 0 => separator = Some(index),
-            _ => {}
-        }
-    }
-    separator
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct Env<'a>(Option<Rc<EnvEntry<'a>>>);
-
-#[derive(Clone, Debug, PartialEq)]
-struct EnvEntry<'a> {
-    value: Value<'a>,
-    parent: Env<'a>,
-}
-
-impl<'a> Env<'a> {
-    fn empty() -> Self {
-        Self(None)
-    }
-
-    fn extend(&self, value: Value<'a>) -> Self {
-        Self(Some(Rc::new(EnvEntry {
-            value,
-            parent: self.clone(),
-        })))
-    }
-
-    fn get(&self, mut index: usize) -> &Value<'a> {
-        let mut current = self;
-        loop {
-            let entry = current.0.as_deref().expect("unbound de Bruijn index");
-            if index == 0 {
-                return &entry.value;
+impl Parser<'_> {
+    fn parse_term(&mut self) -> Option<Term> {
+        let bytes = self.source.as_bytes();
+        match *bytes.get(self.position)? {
+            b'(' => {
+                self.position += 1;
+                if self.source[self.position..].starts_with("λ.") {
+                    self.position += "λ.".len();
+                    let body = self.parse_term()?;
+                    self.expect(b')')?;
+                    Some(Term::Fun(body.into()))
+                } else {
+                    let function = self.parse_term()?;
+                    self.expect(b' ')?;
+                    let argument = self.parse_term()?;
+                    self.expect(b')')?;
+                    Some(Term::App(function.into(), argument.into()))
+                }
             }
-            index -= 1;
-            current = &entry.parent;
+            b'i' => {
+                self.position += 1;
+                let start = self.position;
+                while bytes.get(self.position).is_some_and(u8::is_ascii_digit) {
+                    self.position += 1;
+                }
+                (self.position > start)
+                    .then(|| self.source[start..self.position].parse().ok())
+                    .flatten()
+                    .map(Term::Var)
+            }
+            b'e' if self.source[self.position..].starts_with("error") => {
+                self.position += "error".len();
+                Some(Term::Error)
+            }
+            _ => None,
+        }
+    }
+
+    fn expect(&mut self, expected: u8) -> Option<()> {
+        if self.source.as_bytes().get(self.position) == Some(&expected) {
+            self.position += 1;
+            Some(())
+        } else {
+            None
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Value<'a> {
     #[allow(dead_code)]
     Int(i32),
     Bool(bool),
-    Closure(&'a Term, Env<'a>),
+    Closure(&'a Term, usize),
     Error,
 }
 
-fn apply_value<'a>(function: Value<'a>, argument: Value<'a>) -> Value<'a> {
-    match function {
-        Value::Closure(body, env) => eval(&env.extend(argument), body),
-        Value::Error | Value::Int(_) | Value::Bool(_) => Value::Error,
+struct EnvEntry<'a> {
+    value: Option<Value<'a>>,
+    parent: usize,
+}
+
+struct EvalContext<'a> {
+    // Index zero is the empty environment; all other nodes are immutable after
+    // insertion, so closures can retain an index while the arena grows.
+    environments: Vec<EnvEntry<'a>>,
+}
+
+impl<'a> EvalContext<'a> {
+    fn new() -> Self {
+        Self {
+            environments: vec![EnvEntry {
+                value: None,
+                parent: 0,
+            }],
+        }
+    }
+
+    fn extend(&mut self, parent: usize, value: Value<'a>) -> usize {
+        let index = self.environments.len();
+        self.environments.push(EnvEntry {
+            value: Some(value),
+            parent,
+        });
+        index
+    }
+
+    fn get(&self, mut environment: usize, mut index: usize) -> Value<'a> {
+        loop {
+            let entry = self
+                .environments
+                .get(environment)
+                .filter(|_| environment != 0)
+                .expect("unbound de Bruijn index");
+            if index == 0 {
+                return entry.value.expect("non-empty environment node");
+            }
+            index -= 1;
+            environment = entry.parent;
+        }
+    }
+
+    fn apply(&mut self, function: Value<'a>, argument: Value<'a>) -> Value<'a> {
+        match function {
+            Value::Closure(body, environment) => {
+                let environment = self.extend(environment, argument);
+                self.eval(environment, body)
+            }
+            Value::Error | Value::Int(_) | Value::Bool(_) => Value::Error,
+        }
+    }
+
+    fn eval(&mut self, environment: usize, term: &'a Term) -> Value<'a> {
+        match term {
+            Term::Var(index) => self.get(environment, *index),
+            Term::Fun(body) => Value::Closure(body, environment),
+            Term::App(function, argument) => {
+                let function_value = self.eval(environment, function);
+                if matches!(function_value, Value::Error) {
+                    return Value::Error;
+                }
+
+                let argument_value = self.eval(environment, argument);
+                if matches!(argument_value, Value::Error) {
+                    return Value::Error;
+                }
+
+                self.apply(function_value, argument_value)
+            }
+            Term::Error => Value::Error,
+        }
     }
 }
 
-fn as_church_bool<'a>(value: Value<'a>) -> Option<bool> {
+fn as_church_bool<'a>(context: &mut EvalContext<'a>, value: Value<'a>) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(value),
         Value::Closure(Term::Fun(body), _) => match body.as_ref() {
             Term::Var(0) => Some(false),
             Term::Var(1) => Some(true),
-            _ => apply_church_bool(value),
+            _ => apply_church_bool(context, value),
         },
-        Value::Closure(Term::App(function, argument), env) => {
-            let reduced = apply_value(eval(&env, function), eval(&env, argument));
-            as_church_bool(reduced)
+        Value::Closure(Term::App(function, argument), environment) => {
+            let function = context.eval(environment, function);
+            let argument = context.eval(environment, argument);
+            let reduced = context.apply(function, argument);
+            as_church_bool(context, reduced)
         }
-        Value::Closure(_, _) => apply_church_bool(value),
+        Value::Closure(_, _) => apply_church_bool(context, value),
         Value::Int(_) | Value::Error => None,
     }
 }
 
-fn apply_church_bool<'a>(value: Value<'a>) -> Option<bool> {
-    let first = apply_value(value, Value::Bool(true));
-    match apply_value(first, Value::Bool(false)) {
+fn apply_church_bool<'a>(context: &mut EvalContext<'a>, value: Value<'a>) -> Option<bool> {
+    let first = context.apply(value, Value::Bool(true));
+    match context.apply(first, Value::Bool(false)) {
         Value::Bool(value) => Some(value),
         _ => None,
     }
@@ -161,8 +223,13 @@ fn church_tuple_selector(index: usize) -> Term {
     Term::Fun(Term::App(first.into(), selection.into()).into())
 }
 
-fn as_church_int<'a>(value: Value<'a>) -> Option<i32> {
-    let Value::Closure(body, _) = &value else {
+fn church_tuple_selectors() -> &'static [Term] {
+    static SELECTORS: std::sync::OnceLock<Vec<Term>> = std::sync::OnceLock::new();
+    SELECTORS.get_or_init(|| (0..32).map(church_tuple_selector).collect())
+}
+
+fn as_church_int<'a>(context: &mut EvalContext<'a>, value: Value<'a>) -> Option<i32> {
+    let Value::Closure(body, _) = value else {
         return None;
     };
 
@@ -216,53 +283,23 @@ fn as_church_int<'a>(value: Value<'a>) -> Option<i32> {
         return Some(bits as i32);
     }
 
-    for index in 0..32 {
-        let selector = church_tuple_selector(index);
-        let selected = apply_value(Value::Closure(&selector, Env::empty()), value.clone());
-        if as_church_bool(selected)? {
+    for (index, selector) in church_tuple_selectors().iter().enumerate() {
+        let selected = context.apply(Value::Closure(selector, 0), value);
+        if as_church_bool(context, selected)? {
             bits |= 1 << index;
         }
     }
     Some(bits as i32)
 }
 
-fn eval<'a>(env: &Env<'a>, term: &'a Term) -> Value<'a> {
-    match term {
-        Term::Var(index) => env.get(*index).clone(),
-        Term::Fun(body) => Value::Closure(body, env.clone()),
-        Term::App(function, argument) => {
-            let function_value = eval(env, function);
-            if matches!(function_value, Value::Error) {
-                return Value::Error;
-            }
-
-            let argument_value = eval(env, argument);
-            if matches!(argument_value, Value::Error) {
-                return Value::Error;
-            }
-
-            match function_value {
-                closure @ Value::Closure(_, _) => apply_value(closure, argument_value),
-                Value::Int(_) | Value::Bool(_) => Value::Error,
-                Value::Error => Value::Error,
-            }
-        }
-        Term::Error => Value::Error,
-    }
-}
-
-fn run(term: &Term) -> Value<'_> {
-    eval(&Env::empty(), term)
-}
-
-fn display_result(value: Value<'_>) -> String {
+fn display_result<'a>(value_context: &mut EvalContext<'a>, value: Value<'a>) -> String {
     match value {
         Value::Int(number) => number.to_string(),
         Value::Bool(boolean) => boolean.to_string(),
         Value::Closure(Term::Fun(body), _) if matches!(body.as_ref(), Term::Var(0 | 1)) => {
-            as_church_bool(value).unwrap().to_string()
+            as_church_bool(value_context, value).unwrap().to_string()
         }
-        Value::Closure(_, _) => match as_church_int(value) {
+        Value::Closure(_, _) => match as_church_int(value_context, value) {
             Some(number) => number.to_string(),
             None => "function".to_owned(),
         },
