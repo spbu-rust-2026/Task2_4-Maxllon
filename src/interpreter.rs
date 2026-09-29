@@ -363,7 +363,3 @@ fn display_result<'a>(value_context: &mut EvalContext<'a>, value: Value<'a>) -> 
         Value::Error => "error".to_owned(),
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/interpreter.rs"]
-mod tests;

@@ -1,26 +1,30 @@
 mod interpreter;
-
-#[cfg(test)]
-mod palindrome;
+use std::io::{self, Read};
 
 fn main() {
-    let input = vec![1, 7, 4, 2, 3];
-    let mut show_term = false;
-    let mut source_path = None;
-    for argument in std::env::args().skip(1) {
-        if argument == "--show-term" {
-            show_term = true;
-        } else {
-            source_path = Some(argument);
-        }
-    }
+    let mut text = String::new();
+    io::stdin()
+        .read_to_string(&mut text)
+        .expect("failed to read input");
 
-    let source = source_path
-        .map(|path| std::fs::read_to_string(path).expect("could not read compiled term"))
-        .unwrap_or_else(|| include_str!("i").to_owned());
-    let (term, result) = interpreter::evaluate_source_with_list(&source, show_term, &input);
-    if let Some(term) = term {
-        println!("Терм: {term}");
-    }
-    println!("Результат: {result}");
+    let text = text.trim_end_matches(|character| character == '\n' || character == '\r');
+    println!("{}", longest_palindromic_substring(text));
 }
+
+fn longest_palindromic_substring(_text: &str) -> &str {
+    let input: Vec<i32> = _text.as_bytes().iter().map(|&b| b as i32).collect();
+
+    let source = include_str!("hello_world.py");
+    let (_, result) = interpreter::evaluate_source_with_list(&source, false, &input);
+    let res: usize = match result.parse() {
+        Ok(v) => v,
+        Err(_) => return "",
+    };
+    let res1 = res / (1024 * 64);
+    let res2 = res % (1024 * 64);
+    &_text[res2..res1 + res2]
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/palindrome.rs"]
+mod palindrome_tests;
